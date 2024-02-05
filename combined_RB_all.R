@@ -1,5 +1,5 @@
 ########Spatial transcriptomic profiling of human retinoblastoma############
-########created by Raymond Wong and Luozixian Wang##########################
+########created by Luozixian Wang and Raymond Wong##########################
 ########CERA, UNIMELB, 05/02/2024###########################################
 ##load the packages
 library(AUCell)
