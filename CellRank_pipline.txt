@@ -1,0 +1,124 @@
+########Spatial transcriptomic profiling of human retinoblastoma############
+########created by Raymond Wong and Luozixian Wang##########################
+########CERA, UNIMELB, 05/02/2024###########################################
+
+
+#CellRank can be installed via:
+conda install -c conda-forge -c bioconda cellrank
+#or
+pip install cellrank
+# or with extra libraries, useful for large datasets
+conda install -c conda-forge -c bioconda cellrank-krylov
+
+#Import packages & data
+import sys
+
+if "google.colab" in sys.modules:
+    !pip install -q git+https://github.com/theislab/cellrank@dev
+    !pip install python-igraph
+import scvelo as scv
+import scanpy as sc
+import cellrank as cr
+import numpy as np
+
+scv.settings.verbosity = 3
+scv.settings.set_figure_params("scvelo")
+cr.settings.verbosity = 2
+
+import warnings
+
+warnings.simplefilter("ignore", category=UserWarning)
+warnings.simplefilter("ignore", category=FutureWarning)
+warnings.simplefilter("ignore", category=DeprecationWarning)
+
+#RNA velocity
+adata = scv.read('RNA_velocity.h5ad', cache=True)
+scv.tl.velocity(adata, mode='stochastic')
+#or
+scv.tl.velocity(adata, mode='dynamical')
+scv.tl.velocity_graph(adata)
+scv.pl.velocity_embedding_stream(adata, basis='umap', color='new.cluster.ids', save='embedding_stream.pdf', title='')
+
+#identify terminal state
+cr.tl.terminal_states(adata, cluster_key="new.cluster.ids")
+cr.pl.terminal_states(adata)
+
+#identify initial state
+cr.tl.initial_states(adata, cluster_key="new.cluster.ids")
+cr.pl.initial_states(adata, discrete=True)
+data = (adata.obs)
+data.to_csv('estimate_state.csv')
+
+#set GPCCA estimator (terminal state from macrostate)
+k = cr.tl.transition_matrix(adata, weight_connectivities=0.2, softmax_scale=4, show_progress_bar=False)
+g = cr.tl.estimators.GPCCA(k)
+g.compute_schur(n_components=4)
+g.compute_macrostates(cluster_key="new.cluster.ids")
+g.set_terminal_states_from_macrostates(["2"])
+g.plot_terminal_states(same_plot=False, save="terminal_state_2.pdf")
+
+#compute fate maps
+cr.tl.lineages(adata)
+cr.pl.lineages(adata, same_plot=False)
+#or
+g.compute_absorption_probabilities()
+g.absorption_probabilities
+g.plot_absorption_probabilities(save="fate_2.pdf")
+
+#compute the absorption time
+g.compute_absorption_probabilities(time_to_absorption="all")
+g.absorption_times
+adata.obs["mean_time_to_absorption"] = g.absorption_times["2 mean"]
+scv.pl.scatter(adata, color="mean_time_to_absorption", save="mean_absorption_time.pdf")
+
+#directed PAGA
+scv.tl.recover_latent_time(adata, root_key="initial_states_probs", end_key="terminal_states_probs")
+scv.tl.paga(adata, groups="new.cluster.ids", root_key="initial_states_probs", end_key="terminal_states_probs", use_time_prior="velocity_pseudotime")
+cr.pl.cluster_fates(adata, mode="paga_pie", cluster_key="new.cluster.ids", basis="umap", legend_kwargs={"loc": "top right out"}, legend_loc="top left out", node_size_scale=5, edge_width_scale=1, max_edge_width=4, title="directed PAGA")
+
+#compute lineage drivers
+cr.tl.lineage_drivers(adata)
+#top10 driven gene
+cr.pl.lineage_drivers(adata, lineage="2", n_genes=10)
+
+#gene expression trends
+# compue DPT, starting from CellRank defined root cell
+root_idx = np.where(adata.obs["initial_states"] == "0")[0][0]
+adata.uns["iroot"] = root_idx
+sc.tl.dpt(adata)
+scv.pl.scatter(adata, color=["new.cluster.ids", root_idx, "latent_time", "dpt_pseudotime"], fontsize=16, cmap="viridis", perc=[2, 98], colorbar=True, rescale_color=[0, 1], title=["clusters", "root cell", "latent time", "dpt pseudotime"])
+#plot the dynamics of genes in pseudotime along individual trajectories
+model = cr.ul.models.GAM(adata)
+cr.pl.gene_trends(adata, model=model, data_key="X", genes=["RPS15A", "MALAT1", "FAU", "RPLP1", "RPS18", "RPLP2"], ncols=3, time_key="latent_time", same_plot=True, hide_cells=True, figsize=(15, 4), n_test_points=200)
+cr.pl.gene_trends(adata, model=model, data_key="Ms", genes=["RPS15A", "MALAT1", "FAU", "RPLP1", "RPS18", "RPLP2"], ncols=3, time_key="dpt_pseudotime", same_plot=True, figsize=(15, 4), n_test_points=200, save="individual_gene_trend_pseudo.pdf")
+
+#heatmap of the lineage drivers
+cr.pl.heatmap(adata, model, genes=adata.varm['terminal_lineage_drivers']["2_corr"].sort_values(ascending=False).index[:100], show_absorption_probabilities=True, lineages="2", n_jobs=1, backend="loky", save="heatmap_gene_trend.pdf")
+
+#plot cluster lineage
+cr.pl.cluster_lineage(adata, model, adata.var_names[:200], lineage="2", time_key="dpt_pseudotime", show_progress_bar=False, save="cluster_lineage.pdf")
+adata.uns["lineage_2_trend"].obs["clusters"]
+
+#plot aggregated cellular fates
+cr.pl.cluster_fates(adata, mode="bar", cluster_key="new.cluster.ids", save="bar_fate.pdf")
+cr.pl.cluster_fates(adata, mode="heatmap", cluster_key="new.cluster.ids", save="heatmap_fate.pdf")
+cr.pl.cluster_fates(adata, mode="clustermap", cluster_key="new.cluster.ids", save="cluster_fate.pdf")
+cr.pl.cluster_fates(adata, mode="violin", cluster_key="new.cluster.ids", save="violin_fate.pdf")
+cr.pl.cluster_fates(adata, mode="paga_pie", basis="umap", cluster_key="new.cluster.ids", save="paga_fate_umap.pdf")
+cr.pl.cluster_fates(adata, mode="paga", cluster_key="new.cluster.ids", legend_loc="on data", basis="umap", save="paga_fate_ondata.pdf")
+
+#plot graph structures
+cr.tl.transition_matrix(adata, show_progress_bar=False, weight_connectivities=0.2, softmax_scale=4)
+cr.pl.graph(adata,"T_fwd",edge_alpha=0.1,node_size=5,arrows=False,keys="new.cluster.ids",keylocs="obs")
+ixs = np.where(adata.obs["clusters"] == "2")[0]
+cr.pl.graph(adata, "T_fwd", ixs=ixs, arrows=True, node_size=200, filter_edges=(0.1, 1))
+cr.pl.graph(adata,"T_fwd",ixs=ixs,edge_alpha=0.5,node_size=200,keys="outgoing",arrows=False,top_n_edges=(3, False, "outgoing"),title="outgoing to Beta",edge_reductions=np.max,edge_reductions_restrict_to_ixs=np.where(adata.obs["clusters"] == "Beta")[0],)
+
+
+
+
+
+
+
+
+
